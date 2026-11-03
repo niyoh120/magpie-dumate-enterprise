@@ -12,7 +12,7 @@
 //    enterpriseApiBaseUrl and decrypt its "cookies" with the .cookie-key
 //    AES-256-GCM key (read-only, never writes)
 // 2. manual — paste "dumate_enterprise_sessionid=...; tenantApi=https://<tenant-domain>/api/dumate-enterprise/app"
-//    (cookie copied from DevTools on the tenant domain; tenantApi points at the tenant)
+//    (cookie decrypted from the desktop client's auth.json; tenantApi points at the tenant)
 //
 // Usage/quota: GET {TENANT_API}/users/{bceUserId}/info returns userCredits
 // (totalCredits/usedCredits/remainingCredits) plus today/month call stats.
@@ -132,7 +132,6 @@ function parseCookieString(raw) {
   }
   return out
 }
-const REQUIRED_COOKIES = ["dumate_enterprise_sessionid"]
 const cookieHeaderOf = (cookies) => cookies.map((c) => `${c.name}=${c.value}`).join("; ")
 
 // ---- text safety (same as magpie-dumate) -----------------------------------
@@ -438,45 +437,85 @@ export const DuMateEnterprisePlugin = async () => {
         },
         {
           type: "oauth",
-          label: "手动粘贴企业版 Cookie（需附 tenantApi）",
+          label: "粘贴 auth.json 内容（自动计算鉴权，需 .cookie-key）",
           authorize: async () => ({
             url: "",
             instructions:
-              "粘贴 Cookie 串，格式（示例域替换为你登录页地址栏里的租户域名）：\n" +
-              "dumate_enterprise_sessionid=<值>; tenantApi=https://<租户域名>/api/dumate-enterprise/app\n" +
-              "取值方法：浏览器登录企业版网页后，DevTools → Network → 任一租户域名请求的 Cookie 请求头。\n" +
-              "关键 Cookie（dumate_enterprise_sessionid）是 httpOnly，必须从请求头复制。",
+              "1. 打开本机 qianfan-desktop-app/auth.json，复制完整内容粘贴到下方。\n" +
+              "2. 提供 .cookie-key（32 字节 AES 密钥，解密 cookies 必需，三选一）：\n" +
+              "   a. 在粘贴的 JSON 顶层加一行 \"_cookieKeyBase64\": \"<.cookie-key 文件内容转 base64>\"\n" +
+              "   b. 环境变量 DUMATE_COOKIE_KEY_BASE64（不便内联时用）\n" +
+              "   c. auth.json 与 .cookie-key 在同一台机器时，插件会从同目录自动读取\n" +
+              "3. 插件自动：从 enterpriseApiBaseUrl 算租户 API 基址 → 从 bceUserId 算 userId →\n" +
+              "   解密 cookies → 调 /v1/user 探测 tenantId/displayName → 完成登录。",
             method: "code",
             async callback(input) {
               const raw = String(input ?? "").trim()
-              const cookies = parseCookieString(raw)
-              if (cookies.length < 1) return { type: "failed", error: "无法解析 Cookie 字符串" }
-              const missing = REQUIRED_COOKIES.filter((n) => !cookies.some((c) => c.name === n))
-              if (missing.length) return { type: "failed", error: `Cookie 缺少关键字段：${missing.join(", ")}` }
-              let tenantApi = process.env.DUMATE_ENTERPRISE_API ?? ""
-              const extra = {}
-              const usable = []
-              for (const c of cookies) {
-                if (c.name === "tenantApi") { tenantApi = String(c.value).replace(/\/+$/, ""); continue }
-                if (c.name === "tenantId") { extra.tenantId = String(c.value); continue }
-                usable.push(c)
+              let auth
+              try {
+                auth = JSON.parse(raw)
+              } catch {
+                return { type: "failed", error: "无法解析为 JSON，请粘贴 auth.json 的完整内容" }
               }
-              if (!tenantApi) {
-                return {
-                  type: "failed",
-                  error: "缺少 tenantApi。请在 Cookie 串末尾附带 tenantApi=https://<租户域名>/api/dumate-enterprise/app",
+              const cookiesField = auth?.cookies
+              if (typeof cookiesField !== "string" || !cookiesField) {
+                return { type: "failed", error: "auth.json 缺少 cookies 字段" }
+              }
+              // ---- resolve the 32-byte key: inline > env > local file ----
+              let key = null
+              const inlineB64 = String(auth._cookieKeyBase64 ?? "").trim()
+              if (inlineB64) {
+                try { key = Buffer.from(inlineB64, "base64") } catch { key = null }
+              }
+              if (!key || key.length !== 32) {
+                const envB64 = String(process.env.DUMATE_COOKIE_KEY_BASE64 ?? "").trim()
+                if (envB64) {
+                  try { key = Buffer.from(envB64, "base64") } catch { key = null }
                 }
               }
-              const header = cookieHeaderOf(usable)
+              if (!key || key.length !== 32) {
+                try {
+                  const k = readFileSync(join(desktopUserDataDir(), ".cookie-key"))
+                  if (k.length === 32) key = k
+                } catch { key = null }
+              }
+              if (!key || key.length !== 32) {
+                return {
+                  type: "failed",
+                  error: "未取得 .cookie-key（需 32 字节）。请在 JSON 顶层加 \"_cookieKeyBase64\": \"<.cookie-key的base64>\"，"
+                    + "或设环境变量 DUMATE_COOKIE_KEY_BASE64，或把 auth.json 与 .cookie-key 放同一台机器的 qianfan-desktop-app 目录。",
+                }
+              }
+              // ---- decrypt cookies (same AAD-less AES-256-GCM as desktop) ----
+              let cookies
+              try {
+                const buf = Buffer.from(cookiesField, "base64")
+                const d = createDecipheriv("aes-256-gcm", key, buf.subarray(0, 12))
+                d.setAuthTag(buf.subarray(12, 28))
+                cookies = JSON.parse(Buffer.concat([d.update(buf.subarray(28)), d.final()]).toString("utf8"))
+              } catch (e) {
+                return { type: "failed", error: `cookies 解密失败（确认 _cookieKeyBase64 是 .cookie-key 的 base64）：${e?.message ?? e}` }
+              }
+              if (!Array.isArray(cookies) || !cookies.length) {
+                return { type: "failed", error: "解密结果不是 cookie 数组，key 可能不对" }
+              }
+              const tenantApi = tenantApiFromBaseUrl(
+                auth?.enterpriseApiBaseUrl ?? auth?.accountProfiles?.[0]?.enterpriseApiBaseUrl,
+              )
+              if (!tenantApi) {
+                return { type: "failed", error: "auth.json 缺少 enterpriseApiBaseUrl，无法确定租户 API 基址" }
+              }
+              const first = auth?.accountProfiles?.[0] ?? {}
+              const header = cookieHeaderOf(cookies)
               // Probe whoami: validates the cookie and captures tenant identity.
               let me = null
               try {
                 me = await consoleGet(`${tenantApi}/v1/user`, header)
               } catch (e) {
-                return { type: "failed", error: `Cookie 验证失败：${e?.message ?? e}` }
+                return { type: "failed", error: `登录态验证失败：${e?.message ?? e}` }
               }
-              const tenantId = String(me?.tenantId ?? extra.tenantId ?? "")
-              const userId = String(me?.userId ?? "")
+              const tenantId = String(me?.tenantId ?? "")
+              const userId = String(me?.userId ?? first.bceUserId ?? "")
               if (!tenantId || !userId) {
                 return { type: "failed", error: "租户身份探测失败（/v1/user 缺少 tenantId/userId）" }
               }
@@ -486,12 +525,12 @@ export const DuMateEnterprisePlugin = async () => {
                 refresh: "",
                 expires: 0,
                 source: "manual",
-                accountId: userId,
+                accountId: String(first.bceAccountId ?? userId),
                 userId,
                 tenantApi,
                 tenantId,
-                name: String(me?.displayName ?? ""),
-                cookies: usable,
+                name: String(me?.displayName ?? first.displayName ?? ""),
+                cookies,
               }
             },
           }),

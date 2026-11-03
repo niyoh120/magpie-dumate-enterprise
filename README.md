@@ -58,14 +58,12 @@ magpie plugin login dumate-enterprise
    `activeProviderType: "enterprise"`），自动读取 `enterpriseApiBaseUrl`、解密 `cookies`
    （AES-256-GCM，密钥在 `.cookie-key`），并调用 `/v1/user` 探测 `tenantId`——只读，不写任何文件。
    客户端重新登录后，插件 refresh 会自动跟随新 Cookie。
-2. **手动粘贴 Cookie**（免装客户端）：
-
-   ```
-   dumate_enterprise_sessionid=<值>; tenantApi=https://<租户域名>/api/dumate-enterprise/app
-   ```
-
-   取值：浏览器登录企业版网页后，DevTools → Network → 任一租户域名请求的 **Cookie 请求头**
-   （该 Cookie 是 httpOnly，`document.cookie` 拿不到）。登录时会自动探测并缓存 `tenantId`/`userId`。
+2. **粘贴 auth.json 内容**（跨机/免装客户端场景）：把 `auth.json` 的完整 JSON 粘贴到登录框，
+   插件自动从 `enterpriseApiBaseUrl` 计算租户 API 基址、从 `bceUserId` 计算 userId、解密 cookies、
+   探测 `tenantId` 并完成登录。`.cookie-key` 的提供方式三选一：
+   a. 在粘贴的 JSON 顶层加一行 `"_cookieKeyBase64": "<.cookie-key 内容转 base64>"`
+   b. 环境变量 `DUMATE_COOKIE_KEY_BASE64`
+   c. 与 `auth.json` 在同一台机器时插件自动从 `qianfan-desktop-app` 同目录读取
 
 自定义数据目录：环境变量 `DUMATE_USER_DATA_DIR`。
 其他租户手动登录时用 `tenantApi=` 内联参数或环境变量 `DUMATE_ENTERPRISE_API` 指定基址。
