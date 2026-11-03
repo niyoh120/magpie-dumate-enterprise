@@ -63,7 +63,14 @@ magpie plugin login dumate-enterprise
    探测 `tenantId` 并完成登录。`.cookie-key` 的提供方式三选一：
    a. 在粘贴的 JSON 顶层加一行 `"_cookieKeyBase64": "<.cookie-key 内容转 base64>"`
    b. 环境变量 `DUMATE_COOKIE_KEY_BASE64`
-   c. 与 `auth.json` 在同一台机器时插件自动从 `qianfan-desktop-app` 同目录读取
+   c. 与 `auth.json` 在同一台机器时插件自动从同目录读取
+
+   也支持直接给路径：`file:C:\Users\me\AppData\Roaming\qianfan-desktop-app\auth.json`
+   （省去粘贴长 JSON，插件从该文件同目录读 `.cookie-key`）。
+
+   > 输入框在 magpie 界面里被统一标为「验证码」、标题写「请在浏览器中完成登录」——这是 magpie
+   > 对 code 类登录方式的固定文案（同类插件如 magpie-codebuddy-import 也一样），无需浏览器、
+> 直接粘贴 JSON 或 `file:` 路径后点「完成登录」即可。
 
 自定义数据目录：环境变量 `DUMATE_USER_DATA_DIR`。
 其他租户手动登录时用 `tenantApi=` 内联参数或环境变量 `DUMATE_ENTERPRISE_API` 指定基址。

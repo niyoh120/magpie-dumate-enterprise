@@ -20,7 +20,7 @@
 // organization-purchased), so no checkin hook is implemented on purpose.
 import { createDecipheriv } from "node:crypto"
 import { readFileSync, statSync } from "node:fs"
-import { join } from "node:path"
+import { join, dirname } from "node:path"
 
 const PROVIDER_ID = "dumate-enterprise"
 const PROVIDER_NAME = "百度搭子企业版"
@@ -441,8 +441,11 @@ export const DuMateEnterprisePlugin = async () => {
           authorize: async () => ({
             url: "",
             instructions:
-              "1. 打开本机 qianfan-desktop-app/auth.json，复制完整内容粘贴到下方。\n" +
-              "2. 提供 .cookie-key（32 字节 AES 密钥，解密 cookies 必需，三选一）：\n" +
+              "（下方输入框 magpie 标为「验证码」、标题写「请在浏览器中完成登录」，那是 magpie 对 code 类登录的固定文案，忽略即可：无需浏览器，不是验证码。）\n" +
+              "1. 优先用路径：输入 file:<auth.json 的完整路径>（如 file:C:\\Users\\me\\AppData\\Roaming\\qianfan-desktop-app\\auth.json），\n" +
+              "   插件会直接读该文件，并从同目录读 .cookie-key。\n" +
+              "2. 或复制 auth.json 完整内容粘贴到下方。\n" +
+              "3. 提供 .cookie-key（32 字节 AES 密钥，解密 cookies 必需，三选一）：\n" +
               "   a. 在粘贴的 JSON 顶层加一行 \"_cookieKeyBase64\": \"<.cookie-key 文件内容转 base64>\"\n" +
               "   b. 环境变量 DUMATE_COOKIE_KEY_BASE64（不便内联时用）\n" +
               "   c. auth.json 与 .cookie-key 在同一台机器时，插件会从同目录自动读取\n" +
@@ -450,12 +453,23 @@ export const DuMateEnterprisePlugin = async () => {
               "   解密 cookies → 调 /v1/user 探测 tenantId/displayName → 完成登录。",
             method: "code",
             async callback(input) {
-              const raw = String(input ?? "").trim()
+              let raw = String(input ?? "").trim()
+              let fileDir = null
+              // "file:<path>" reads auth.json (and its sibling .cookie-key) from disk.
+              if (/^file:/i.test(raw)) {
+                const p = raw.replace(/^file:/i, "").trim().replace(/^["']|["']$/g, "")
+                try {
+                  raw = readFileSync(p, "utf8")
+                  fileDir = dirname(p)
+                } catch (e) {
+                  return { type: "failed", error: `读取 auth.json 失败：${e?.message ?? e}` }
+                }
+              }
               let auth
               try {
                 auth = JSON.parse(raw)
               } catch {
-                return { type: "failed", error: "无法解析为 JSON，请粘贴 auth.json 的完整内容" }
+                return { type: "failed", error: "无法解析为 JSON：可输入 file:<auth.json完整路径>，或粘贴 auth.json 完整内容" }
               }
               const cookiesField = auth?.cookies
               if (typeof cookiesField !== "string" || !cookiesField) {
@@ -474,10 +488,13 @@ export const DuMateEnterprisePlugin = async () => {
                 }
               }
               if (!key || key.length !== 32) {
-                try {
-                  const k = readFileSync(join(desktopUserDataDir(), ".cookie-key"))
-                  if (k.length === 32) key = k
-                } catch { key = null }
+                for (const d of [fileDir, desktopUserDataDir()]) {
+                  if (!d) continue
+                  try {
+                    const k = readFileSync(join(d, ".cookie-key"))
+                    if (k.length === 32) { key = k; break }
+                  } catch { /* try next */ }
+                }
               }
               if (!key || key.length !== 32) {
                 return {
